@@ -84,7 +84,7 @@
  *
  * Default settings:
  *   Movement threshold: 25 meters
- *   Stationary interval: 10 minutes
+ *   Stationary interval: 15 minutes
  *
  * USB serial commands (115200 baud)
  * ---------------------------------
