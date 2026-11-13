@@ -53,7 +53,7 @@ This avoids sending an uplink for every GPS check while ensuring that a stationa
 | --- | --- |
 | GPS check interval | 60 seconds |
 | Movement threshold | 25 metres |
-| Stationary reporting interval | 10 minutes |
+| Stationary reporting interval | 15 minutes |
 
 Both reporting parameters can be changed through USB serial commands.
 
