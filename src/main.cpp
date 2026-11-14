@@ -1,8 +1,8 @@
 /*
  * ============================================================================
- * Project      : The Things Network LoRaWAN Mapper
- * Version      : 1.0.0
- * Release date : 2026-11-13
+ * Project      : TTN LoRaWAN Mapper (The Things Network)
+ * Version      : 1.1.1
+ * Release date : 2026-11-14
  * Copyright    : (C) 2026 Hilitec
  * Author       : Andre Liechti
  * License      : GNU General Public License v3.0 or later
@@ -31,6 +31,8 @@
  *   - Battery voltage monitoring
  *   - OLED status display
  *   - On-demand Wi-Fi configuration portal
+ *   - Web-based firmware update through the temporary Wi-Fi portal
+ *   - Versioned OLED splash screen at startup
  *   - Automatic Wi-Fi shutdown after configuration
  *   - Automatic OTAA join retries when activation fails
  *   - Movement-based GPS reporting using a configurable distance threshold
@@ -145,6 +147,12 @@
  * ============================================================================
  */
 
+// --- Application metadata ---
+static const char APP_NAME[] = "TTN LoRaWAN Mapper";
+static const char APP_VERSION[] = "1.1.1";
+static const char APP_RELEASE_DATE[] = "2026-11-14";
+static const char APP_COPYRIGHT[] = "(c) 2026 Hilitec";
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <XPowersLib.h>
@@ -152,6 +160,8 @@
 #include <TinyGPSPlus.h>
 #include <Preferences.h>
 #include <WiFiManager.h>
+#include <WebServer.h>
+#include <Update.h>
 #include <U8g2lib.h>
 #include <string.h>
 #include <stdlib.h>
@@ -217,6 +227,52 @@ void updateOLED(
   u8g2.drawStr(0, 36, line3.c_str());
   u8g2.drawStr(0, 50, line4.c_str());
   u8g2.sendBuffer();
+}
+
+void showSplashScreen() {
+  u8g2.clearBuffer();
+
+  // Use the largest bold font that fits the 128-pixel display width.
+  u8g2.setFont(u8g2_font_helvB14_tf);
+
+  if (u8g2.getStrWidth(APP_NAME) > 124) {
+    u8g2.setFont(u8g2_font_helvB12_tf);
+  }
+
+  if (u8g2.getStrWidth(APP_NAME) > 124) {
+    u8g2.setFont(u8g2_font_6x13B_tf);
+  }
+
+  int titleWidth = u8g2.getStrWidth(APP_NAME);
+  u8g2.drawStr((128 - titleWidth) / 2, 18, APP_NAME);
+
+  u8g2.drawHLine(4, 24, 120);
+
+  String versionLine = String("Version ") + APP_VERSION + ", " + APP_RELEASE_DATE;
+  u8g2.setFont(u8g2_font_4x6_tf);
+  int versionWidth = u8g2.getStrWidth(versionLine.c_str());
+  u8g2.drawStr((128 - versionWidth) / 2, 39, versionLine.c_str());
+
+  u8g2.setFont(u8g2_font_5x8_tf);
+  int copyrightWidth = u8g2.getStrWidth(APP_COPYRIGHT);
+  u8g2.drawStr((128 - copyrightWidth) / 2, 55, APP_COPYRIGHT);
+
+  u8g2.sendBuffer();
+
+  // Keep the splash screen visible for up to 5 seconds.
+  // A USER button press skips the remaining display time.
+  uint32_t splashStart = millis();
+
+  while (millis() - splashStart < 5000UL) {
+    if (digitalRead(USER_BUTTON) == LOW) {
+      delay(25); // Debounce
+      if (digitalRead(USER_BUTTON) == LOW) {
+        return;
+      }
+    }
+
+    delay(10);
+  }
 }
 
 // --- LoRaWAN buffer helpers (RadioLib 6.6.x) ---
@@ -656,6 +712,187 @@ void initPMU() {
   delay(250);
 }
 
+// --- Web firmware update ---
+static WiFiManager* activePortalManager = nullptr;
+static bool otaUploadStarted = false;
+static bool otaUploadComplete = false;
+static bool otaUploadFailed = false;
+static String otaUploadError;
+
+void handleFirmwarePage() {
+  if (activePortalManager == nullptr || activePortalManager->server == nullptr) {
+    return;
+  }
+
+  String page = F(
+    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Firmware Update</title>"
+    "<style>body{font-family:Arial,sans-serif;max-width:560px;margin:35px auto;padding:0 16px;color:#222;}"
+    "h2{margin-bottom:6px;}p{line-height:1.45;}input,button{font-size:16px;margin:12px 0;}"
+    "button{padding:10px 18px;}progress{width:100%;height:20px;}a{color:#1769aa;}</style>"
+    "</head><body><h2>TTN LoRaWAN Mapper</h2><h3>Firmware Update</h3>"
+    "<p>Current firmware: <strong>"
+  );
+  page += APP_VERSION;
+  page += F(
+    "</strong></p><p>Select the firmware binary (firmware.bin).</p>"
+    "<p><strong>Warning:</strong> The setup access point is open. Only update the device when you control physical access to it.</p>"
+    "<form id='uploadForm'>"
+    "<input id='firmware' name='firmware' type='file' accept='.bin,application/octet-stream' required>"
+    "<br><button id='uploadButton' type='submit'>Install firmware</button></form>"
+    "<progress id='progress' max='100' value='0'></progress><p id='status'>Waiting for firmware file.</p>"
+    "<p><a href='/'>Back to configuration</a></p>"
+    "<script>"
+    "const form=document.getElementById('uploadForm');"
+    "const fileInput=document.getElementById('firmware');"
+    "const progress=document.getElementById('progress');"
+    "const statusText=document.getElementById('status');"
+    "const uploadButton=document.getElementById('uploadButton');"
+    "form.addEventListener('submit',function(event){"
+    "event.preventDefault();"
+    "if(!fileInput.files.length){statusText.textContent='Select a .bin file first.';return;}"
+    "const file=fileInput.files[0];"
+    "if(!file.name.toLowerCase().endsWith('.bin')){statusText.textContent='Only .bin files are accepted.';return;}"
+    "const data=new FormData();data.append('firmware',file,file.name);"
+    "const xhr=new XMLHttpRequest();xhr.open('POST','/firmware/upload');"
+    "uploadButton.disabled=true;statusText.textContent='Uploading firmware...';"
+    "xhr.upload.addEventListener('progress',function(e){if(e.lengthComputable){"
+    "progress.value=Math.round((e.loaded/e.total)*100);"
+    "statusText.textContent='Uploading: '+progress.value+'%';}});"
+    "xhr.onload=function(){statusText.textContent=xhr.responseText;if(xhr.status>=400){uploadButton.disabled=false;}};"
+    "xhr.onerror=function(){statusText.textContent='Upload connection failed.';uploadButton.disabled=false;};"
+    "xhr.send(data);});"
+    "</script></body></html>"
+  );
+
+  activePortalManager->server->send(200, "text/html", page);
+}
+
+void handleFirmwareUpload() {
+  if (activePortalManager == nullptr || activePortalManager->server == nullptr) {
+    return;
+  }
+
+  HTTPUpload& upload = activePortalManager->server->upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    otaUploadStarted = false;
+    otaUploadComplete = false;
+    otaUploadFailed = false;
+    otaUploadError = "";
+
+    String filename = upload.filename;
+    filename.toLowerCase();
+
+    if (!filename.endsWith(".bin")) {
+      otaUploadFailed = true;
+      otaUploadError = "Invalid file type. Select a firmware .bin file.";
+      Serial.println("[OTA] Rejected upload: file is not a .bin image.");
+      return;
+    }
+
+    Serial.printf("[OTA] Receiving firmware: %s\n", upload.filename.c_str());
+
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+      otaUploadFailed = true;
+      otaUploadError = Update.errorString();
+      Serial.printf("[OTA] Update.begin() failed: %s\n", otaUploadError.c_str());
+      return;
+    }
+
+    otaUploadStarted = true;
+    updateOLED("FIRMWARE UPDATE", "Uploading...", "Do not power off", "");
+
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (!otaUploadStarted || otaUploadFailed) {
+      return;
+    }
+
+    size_t written = Update.write(upload.buf, upload.currentSize);
+
+    if (written != upload.currentSize) {
+      otaUploadFailed = true;
+      otaUploadError = Update.errorString();
+      Serial.printf("[OTA] Flash write failed: %s\n", otaUploadError.c_str());
+      Update.abort();
+      otaUploadStarted = false;
+    }
+
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (!otaUploadStarted || otaUploadFailed) {
+      return;
+    }
+
+    if (Update.end(true)) {
+      otaUploadComplete = true;
+      otaUploadStarted = false;
+      Serial.printf("[OTA] Firmware uploaded successfully: %lu bytes.\n", static_cast<unsigned long>(upload.totalSize));
+      updateOLED("FIRMWARE READY", "Upload complete", "Rebooting...", "");
+    } else {
+      otaUploadFailed = true;
+      otaUploadError = Update.errorString();
+      otaUploadStarted = false;
+      Serial.printf("[OTA] Finalization failed: %s\n", otaUploadError.c_str());
+    }
+
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    if (otaUploadStarted) {
+      Update.abort();
+    }
+
+    otaUploadStarted = false;
+    otaUploadFailed = true;
+    otaUploadError = "Upload aborted.";
+    Serial.println("[OTA] Firmware upload aborted.");
+  }
+}
+
+void handleFirmwareUploadResult() {
+  if (activePortalManager == nullptr || activePortalManager->server == nullptr) {
+    return;
+  }
+
+  auto* server = activePortalManager->server.get();
+  server->sendHeader("Connection", "close");
+
+  if (otaUploadComplete && !otaUploadFailed) {
+    server->send(
+      200,
+      "text/plain",
+      "Firmware image accepted. The device will reboot now."
+    );
+
+    Serial.println("[OTA] Restarting with the new firmware.");
+    delay(1200);
+    ESP.restart();
+    return;
+  }
+
+  String error = otaUploadError.length() > 0
+    ? otaUploadError
+    : String("Firmware update failed.");
+
+  server->send(400, "text/plain", error);
+  Serial.printf("[OTA] Update rejected: %s\n", error.c_str());
+}
+
+void registerFirmwareRoutes() {
+  if (activePortalManager == nullptr || activePortalManager->server == nullptr) {
+    Serial.println("[OTA] Cannot register firmware routes.");
+    return;
+  }
+
+  activePortalManager->server->on("/firmware", HTTP_GET, handleFirmwarePage);
+  activePortalManager->server->on(
+    "/firmware/upload",
+    HTTP_POST,
+    handleFirmwareUploadResult,
+    handleFirmwareUpload
+  );
+
+  Serial.println("[OTA] Firmware update routes registered.");
+}
+
 // --- Wi-Fi configuration portal ---
 // Intentionally preserved from the supplied original version.
 void startConfigPortal() {
@@ -668,12 +905,22 @@ void startConfigPortal() {
   const char* menu[] = {"param"};
   wm.setMenu(menu, 1);
   wm.setTitle("LoRaWAN Configuration");
+  // WiFiManager 2.0.17 does not provide setCustomBodyFooter().
+  // Inject the firmware link through the supported custom head element.
   wm.setCustomHeadElement(
     "<script>"
     "document.addEventListener('DOMContentLoaded',function(){"
     "document.querySelectorAll(\"form[action='/param'] button\").forEach(function(button){"
     "button.textContent='Configure LoRaWAN';"
     "});"
+    "var footer=document.createElement('div');"
+    "footer.style.cssText='text-align:center;margin:20px 0 10px;font-size:16px';"
+    "var link=document.createElement('a');"
+    "link.href='/firmware';"
+    "link.textContent='Firmware Update';"
+    "link.style.fontWeight='bold';"
+    "footer.appendChild(link);"
+    "document.body.appendChild(footer);"
     "});"
     "</script>"
   );
@@ -717,8 +964,13 @@ void startConfigPortal() {
   wm.addParameter(&p_move_threshold);
   wm.addParameter(&p_stationary_interval);
   wm.setConfigPortalTimeout(180);
+  activePortalManager = &wm;
+  wm.setWebServerCallback(registerFirmwareRoutes);
 
-  if (!wm.startConfigPortal("TBeam-Mapper-Setup")) {
+  bool portalStarted = wm.startConfigPortal("TBeam-Mapper-Setup");
+  activePortalManager = nullptr;
+
+  if (!portalStarted) {
     updateOLED("PORTAL TIME EXPIRED", "Rebooting...", "", "");
     delay(1000);
     ESP.restart();
@@ -853,7 +1105,7 @@ void setup() {
   initPMU();
 
   u8g2.begin();
-  updateOLED("T-Beam LoRaWAN Mapper", "Rebooting...", "", "");
+  showSplashScreen();
 
   Serial1.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
 
@@ -872,7 +1124,7 @@ void setup() {
     startConfigPortal();
   }
 
-  updateOLED("T-Beam LoRaWAN Mapper", "Initializing SX1276...", "", "");
+  updateOLED("TTN LoRaWAN Mapper", "Initializing SX1276...", "", "");
 
   int state = radio.begin();
 
@@ -1023,12 +1275,16 @@ void loop() {
       ? "Lon: " + String(gps.location.lng(), 5)
       : "GPS: waiting for fix";
 
+    // Battery voltage is returned by the PMU in millivolts.
+    float batteryVoltage = PMU.getBattVoltage() / 1000.0f;
+
+    // Display the next DevNonce value that RadioLib will use.
     uint16_t nextDevNonce = readRadioLibUint16(
       &node.getBufferNonces()[RADIOLIB_LORAWAN_NONCES_DEV_NONCE]
     );
 
     char nonceText[5];
-    snprintf(nonceText, sizeof(nonceText), "%04X", nextDevNonce);
+    snprintf(nonceText, sizeof(nonceText), "%03X", nextDevNonce);
 
     // Alternate the diagnostic line to preserve the existing OLED information.
     static bool showGpsStats = true;
@@ -1048,11 +1304,14 @@ void loop() {
         static_cast<unsigned long>(elapsedMinutes)
       );
 
-      l4 = String(metrics);
+      l4 = "S:" + String(gps.satellites.value()) + " " +
+        String(metrics);
     } else if (showGpsStats) {
-      l4 = "Move:-- Age:--";
+      l4 = "S:" + String(gps.satellites.value()) + " " +
+        "Move:-- Age:--";
     } else {
       l4 = "S:" + String(gps.satellites.value()) +
+        " B:" + String(batteryVoltage, 2) + "V" +
         " DN:" + String(nonceText) +
         " TX:" + String(txCount);
     }

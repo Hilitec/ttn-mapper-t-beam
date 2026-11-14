@@ -22,6 +22,8 @@ The device periodically reports its geographical position and battery voltage ov
 - **Battery voltage monitoring**.
 - **OLED status display**.
 - **Wi-Fi configuration portal** for initial setup and later credential updates.
+- **Web-based firmware update** through the temporary Wi-Fi portal
+- **Versioned OLED splash screen** at startup
 - **USB serial commands** for configuration and diagnostics.
 - **Automatic Wi-Fi shutdown** after configuration.
 - **Automatic OTAA join retries** when activation fails.
@@ -204,8 +206,8 @@ See the [GNU General Public License](https://www.gnu.org/licenses/gpl-3.0.html) 
 | | |
 | --- | --- |
 | **Project** | The Things Network LoRaWAN Mapper |
-| **Version** | 1.0.0 |
-| **Release date** | 2026-11-13 |
+| **Version** | 1.1.1 |
+| **Release date** | 2026-11-14 |
 | **Copyright** | © 2026 Hilitec |
 | **Author** | Andre Liechti |
 | **License** | GNU GPL v3.0 or later |
