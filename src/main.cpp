@@ -1,8 +1,8 @@
 /*
  * ============================================================================
  * Project      : TTN LoRaWAN Mapper (The Things Network)
- * Version      : 1.1.1
- * Release date : 2026-11-14
+ * Version      : 1.2.0
+ * Release date : 2026-11-15
  * Copyright    : (C) 2026 Hilitec
  * Author       : Andre Liechti
  * License      : GNU General Public License v3.0 or later
@@ -149,8 +149,8 @@
 
 // --- Application metadata ---
 static const char APP_NAME[] = "TTN LoRaWAN Mapper";
-static const char APP_VERSION[] = "1.1.1";
-static const char APP_RELEASE_DATE[] = "2026-11-14";
+static const char APP_VERSION[] = "1.2.0";
+static const char APP_RELEASE_DATE[] = "2026-11-15";
 static const char APP_COPYRIGHT[] = "(c) 2026 Hilitec";
 
 #include <Arduino.h>
@@ -212,6 +212,13 @@ static const uint8_t PENDING_JOIN = 1;
 static const uint8_t PENDING_UPLINK = 2;
 
 bool nonceRestoreFatal = false;
+
+bool portalParamsSaved = false;
+
+void onPortalParamsSaved() {
+  portalParamsSaved = true;
+  Serial.println("[WIFI] LoRaWAN parameters submitted.");
+}
 
 // --- OLED display ---
 void updateOLED(
@@ -902,7 +909,7 @@ void startConfigPortal() {
   WiFiManager wm;
 
   // Expose only the LoRaWAN parameter page and portal exit.
-  const char* menu[] = {"param"};
+  const char* menu[] = {"wifinoscan"};
   wm.setMenu(menu, 1);
   wm.setTitle("LoRaWAN Configuration");
   // WiFiManager 2.0.17 does not provide setCustomBodyFooter().
@@ -910,7 +917,7 @@ void startConfigPortal() {
   wm.setCustomHeadElement(
     "<script>"
     "document.addEventListener('DOMContentLoaded',function(){"
-    "document.querySelectorAll(\"form[action='/param'] button\").forEach(function(button){"
+    "document.querySelectorAll(\"form[action='/wifisave'] button\").forEach(function(button){"
     "button.textContent='Configure LoRaWAN';"
     "});"
     "var footer=document.createElement('div');"
@@ -963,15 +970,29 @@ void startConfigPortal() {
   wm.addParameter(&p_appkey);
   wm.addParameter(&p_move_threshold);
   wm.addParameter(&p_stationary_interval);
+
   wm.setConfigPortalTimeout(180);
+  wm.setSaveConnect(false);
+  wm.setBreakAfterConfig(true);
+
+  portalParamsSaved = false;
+  wm.setSaveParamsCallback(onPortalParamsSaved);
+
   activePortalManager = &wm;
   wm.setWebServerCallback(registerFirmwareRoutes);
 
+  Serial.println("[WIFI] Starting configuration portal.");
+
   bool portalStarted = wm.startConfigPortal("TBeam-Mapper-Setup");
+
+  Serial.printf("[WIFI] Portal returned: %s\n",
+    portalStarted ? "true" : "false");
+
   activePortalManager = nullptr;
 
-  if (!portalStarted) {
-    updateOLED("PORTAL TIME EXPIRED", "Rebooting...", "", "");
+  if (!portalParamsSaved) {
+    Serial.println("[WIFI] Portal closed without saving parameters.");
+    updateOLED("PORTAL CLOSED", "No changes saved", "Rebooting...", "");
     delay(1000);
     ESP.restart();
   }
@@ -1102,6 +1123,8 @@ void setup() {
 
   pinMode(USER_BUTTON, INPUT); // GPIO 38 has already an external pull-up on the T-Beam
 
+  bool userButtonPressedAtBoot = (digitalRead(USER_BUTTON) == LOW);
+
   initPMU();
 
   u8g2.begin();
@@ -1117,7 +1140,7 @@ void setup() {
   stationaryIntervalMinutes = prefs.getUShort("still_min", 15);
   prefs.end();
 
-  if (digitalRead(USER_BUTTON) == LOW ||
+  if (userButtonPressedAtBoot ||
       strDevEUI.length() != 16 ||
       strAppEUI.length() != 16 ||
       strAppKey.length() != 32) {
